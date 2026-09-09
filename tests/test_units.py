@@ -311,7 +311,7 @@ class TestOverallProgress(unittest.TestCase):
     """总进度为按课程时长加权，且限制在 0~100%。"""
 
     def test_weighted_vs_arithmetic(self):
-        # 两门课：A 4800秒学满(100%)，B 12000秒只有一半(50%)。时长加权应偏大。
+        # 两门课：A 4800秒学满(100%)，B 12000秒只有一半(50%)。长课程B是低进度 -> 时长加权会比算术平均(75%)更小。
         entries = [
             {"learn_sec": 4800, "target": 4800},
             {"learn_sec": 6000, "target": 12000},
@@ -397,6 +397,53 @@ class TestCnkiClientProgress(unittest.TestCase):
     def test_no_token_returns_none(self):
         import cnki_client
         self.assertIsNone(cnki_client.fetch_progress(_FakePage("{}"), {"authtoken": ""}))
+
+
+class TestRunScopedDefaults(unittest.TestCase):
+    """新任务开始时应重置的生命周期字段，避免上一轮达标/暂停/停用状态残留。"""
+
+    def test_defaults_clear_cert_reached(self):
+        d = core.run_scoped_defaults()
+        self.assertIs(d["cert_reached"], False)
+
+    def test_defaults_clear_run_flags(self):
+        d = core.run_scoped_defaults()
+        self.assertIs(d["stop_requested"], False)
+        self.assertIs(d["paused"], False)
+        self.assertIs(d["done"], False)
+
+
+class TestFallbackAmbiguity(unittest.TestCase):
+    """缺 courseId 的名称兜底：单个可兜底；同名重复视为歧义，跳过自动关联，不静默覆盖。"""
+
+    def test_single_missing_id_ok(self):
+        pm = core.parse_progress_items([{"courseName": "孤立课", "progress": 50}])
+        self.assertEqual(pm["name:孤立课"]["progress"], 50.0)
+        self.assertEqual(core.progress_for_course(pm, None, "孤立课")["progress"], 50.0)
+        single, amb = core.fallback_summary(pm)
+        self.assertEqual(single, ["孤立课"])
+        self.assertEqual(amb, [])
+
+    def test_duplicate_missing_id_ambiguous(self):
+        pm = core.parse_progress_items([
+            {"courseName": "同名课", "progress": 10},
+            {"courseName": "同名课", "progress": 90},
+        ])
+        self.assertIsNone(pm["name:同名课"])
+        # 歧义 -> 不再自动匹配（返回空），绝不静默取其中之一
+        self.assertEqual(core.progress_for_course(pm, None, "同名课"), {})
+        single, amb = core.fallback_summary(pm)
+        self.assertEqual(amb, ["同名课"])
+        self.assertEqual(single, [])
+
+    def test_different_ids_same_name_untouched(self):
+        pm = core.parse_progress_items([
+            {"courseId": 10, "courseName": "同名课", "progress": 20},
+            {"courseId": 11, "courseName": "同名课", "progress": 80},
+        ])
+        self.assertEqual(pm["10"]["progress"], 20.0)
+        self.assertEqual(pm["11"]["progress"], 80.0)
+        self.assertEqual(core.fallback_summary(pm), ([], []))
 
 
 if __name__ == "__main__":

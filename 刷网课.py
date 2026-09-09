@@ -18,8 +18,10 @@ from core import (
     overall_progress,
     parse_creds_text,
     parse_theme_url,
+    fallback_summary,
     progress_for_course,
     reached_cert_target,
+    run_scoped_defaults,
     total_learned,
 )
 import browser_session
@@ -193,7 +195,7 @@ def run_browser(user, pwd, theme_url):
             state.log("读取学习中心失败，无法获取认证 token，将按无进度继续: " + str(e))
             auth = {"lid": "", "uid": "", "authtoken": ""}
         if not auth.get("authtoken"):
-            state.log("未捕获到 authtoken（仅能按视频时长继续，进度同步可能受限）。")
+            state.log("未捕获到认证信息，暂时无法同步服务端学习进度；若连续 %d 次同步失败，本轮任务将停止。" % PROGRESS_FAIL_LIMIT)
         else:
             state.log("认证信息读取完成。")
 
@@ -221,6 +223,11 @@ def run_browser(user, pwd, theme_url):
         prog_map = fetch_progress() or {}
         if prog_map:
             state.log("已读取到服务器端学习进度")
+            _single, _amb = fallback_summary(prog_map)
+            for _n in _single:
+                state.log("服务端课程“%s”缺少 courseId，将使用课程名称作为兜底匹配。" % _n)
+            for _n in _amb:
+                state.log("检测到多个缺少 courseId 的同名课程“%s”，名称兜底存在歧义，已跳过自动关联。" % _n)
         else:
             state.log("未能读取服务器进度，将按视频时长继续")
 
@@ -533,10 +540,9 @@ def build_gui():
             state.theme_url = parse_theme_url(tv.get().strip())[0]
             state.run_id = time.strftime("%Y%m%d_%H%M%S")
             state.start_time = time.strftime("%Y-%m-%d %H:%M:%S")
+            for _k, _v in run_scoped_defaults().items():
+                setattr(state, _k, _v)
             state.running = True
-            state.stop_requested = False
-            state.paused = False
-            state.done = False
             state.thread = threading.Thread(target=worker, daemon=True)
         state.log("已开始，正在启动后台浏览器线程...")
         state.thread.start()

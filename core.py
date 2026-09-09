@@ -65,17 +65,25 @@ def field_or_current(entry, key, current, cast):
 def parse_progress_items(items):
     """把服务端 /kedu/course/list 的 list 映射为 {课程稳定key: {...}}。
 
-    优先以 courseId 作唯一键；若条目缺失 courseId，则回退用"name:<课程名>"兜底（并输出到 entry["cid"] 为空）。
-    课程名称只用于展示/日志，不参与唯一标识，避免同名课程进度串课。
+    优先以 courseId 作唯一键；若条目缺失 courseId，则回退用"name:<课程名>"兜底。
+    同一名称的兜底 key 若出现多次（都缺 courseId），判定为歧义，将该 key 置为 None，
+    避免静默覆盖导致同名课程错误关联。
     progress / learnDuration 的 0 被保留为合法值；仅 None 才回退默认。
     """
     out = {}
+    seen_fallback = {}
     for it in items or []:
         cid = it.get("courseId")
         name = (it.get("courseName") or "").strip()
         if cid is None and not name:
             continue
         key = str(cid) if cid is not None else "name:" + name
+        if cid is None:
+            if key in seen_fallback:
+                out[key] = None  # 同名兜底冲突 -> 歧义，不再自动匹配
+                seen_fallback[key] += 1
+                continue
+            seen_fallback[key] = 1
         out[key] = {
             "cid": str(cid) if cid is not None else "",
             "name": name,
@@ -86,6 +94,22 @@ def parse_progress_items(items):
             "finishDate": it.get("finishDate"),
         }
     return out
+
+
+def fallback_summary(prog_map):
+    """扫描进度 map，返回 (单次名称兜底的课程名列表, 歧义同名课程的列表)。
+
+    用于一次性日志；都为空说明全部走正常 ID 匹配。
+    """
+    single, ambiguous = [], []
+    for k, e in (prog_map or {}).items():
+        if isinstance(k, str) and k.startswith("name:"):
+            name = k[5:]
+            if e is None:
+                ambiguous.append(name)
+            else:
+                single.append(name)
+    return single, ambiguous
 
 
 def progress_for_course(prog_map, cid, name):
@@ -193,3 +217,11 @@ def advance_fail_count(count, ok, limit):
         return 0, False
     new = count + 1
     return new, (new >= limit)
+
+
+def run_scoped_defaults():
+    """每次“开始学习”时需重置为“全新一次任务”的生命周期字段及默认值。
+
+    用于避免上一次运行的停用/暂停/完成/达标状态在下一轮残留。
+    """
+    return {"stop_requested": False, "paused": False, "done": False, "cert_reached": False}
