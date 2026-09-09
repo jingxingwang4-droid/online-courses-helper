@@ -65,7 +65,12 @@ def fetch_progress(page, auth):
 
 
 def fetch_theme_courses(page, theme_id):
-    """返回 [(courseId, 课程名), ...]。请求/解析失败时抛出异常，由调用方记录日志。"""
+    """返回 [(course_id, display_name, match_name), ...]。
+
+    display_name = tutorTitle（优先）或 courseName，用于 GUI / 日志。
+    match_name   = courseName，用于名称 fallback 兼容匹配（与 progress.courseName 同源）。
+    请求/解析失败时抛出异常，由调用方记录日志。
+    """
     body = page.evaluate(
         "async (u)=>{const r=await fetch(u,{credentials:'include'});return await r.text();}",
         THEME_COURSE_URL.format(theme_id=theme_id),
@@ -73,5 +78,8 @@ def fetch_theme_courses(page, theme_id):
     data = json.loads(body)["data"]
     out = []
     for item in data:
-        out.append((str(item["courseId"]), (item.get("tutorTitle", "") or item.get("courseName", "")).strip()))
+        cid = str(item["courseId"])
+        display = (item.get("tutorTitle", "") or item.get("courseName", "")).strip()
+        match = (item.get("courseName", "") or "").strip()
+        out.append((cid, display, match))
     return out

@@ -71,9 +71,10 @@ def read_creds():
 
 
 class Course:
-    def __init__(self, cid, name, target):
+    def __init__(self, cid, display_name, match_name, target):
         self.cid = cid
-        self.name = name
+        self.name = display_name               # 展示名（GUI/日志用）
+        self.match_name = match_name or ""      # 兼容匹配名（名称 fallback 用，通常为 courseName）
         self.target = target if target is not None else 6300.0
         self.watched = 0.0
         self.server_watched = 0.0
@@ -88,6 +89,7 @@ class Course:
         return {
             "cid": self.cid,
             "name": self.name,
+            "match_name": self.match_name,
             "target": self.target,
             "watched": self.watched,
             "server_watched": self.server_watched,
@@ -221,12 +223,12 @@ def run_browser(user, pwd, theme_url):
         state.log("共获取 " + str(len(courses_data)) + " 门课程")
 
         name_count = {}
-        for _cid, _nm in courses_data:
-            name_count[_nm] = name_count.get(_nm, 0) + 1
+        for _cid, _display, _match in courses_data:
+            name_count[_match] = name_count.get(_match, 0) + 1
 
-        def lookup_progress(prog_map, cid, name):
-            """先按课程 ID 精确匹配；仅当该名称在专题内唯一时才允许名称兜底。"""
-            return progress_for_course_safe(prog_map, cid, name, name_count.get(name, 0) == 1)
+        def lookup_progress(prog_map, cid, match_name):
+            """先按课程 ID 精确匹配；仅当该 match_name 在专题内唯一时才允许名称兜底。"""
+            return progress_for_course_safe(prog_map, cid, match_name, name_count.get(match_name, 0) == 1)
 
         prog_map = fetch_progress() or {}
         if prog_map:
@@ -243,10 +245,10 @@ def run_browser(user, pwd, theme_url):
             state.log("暂未读取到服务器进度；若连续同步失败达到阈值，本轮将停止。")
 
         courses = []
-        for cid, name in courses_data:
-            pm = lookup_progress(prog_map, cid, name)
+        for cid, display, match in courses_data:
+            pm = lookup_progress(prog_map, cid, match)
             target = pm["duration"] if pm.get("duration") is not None else 6300.0
-            course = Course(cid, name, target)
+            course = Course(cid, display, match, target)
             if pm:
                 pct = pm["progress"] if pm.get("progress") is not None else 0.0
                 course.percent = float(pct)
@@ -280,7 +282,7 @@ def run_browser(user, pwd, theme_url):
         def sync_from_server(course):
             """把服务端最新进度回写到 course，并刷新累计时长。注意 0 是合法值，不会回退旧值。"""
             try:
-                pm = lookup_progress(fetch_progress() or {}, course.cid, course.name)
+                pm = lookup_progress(fetch_progress() or {}, course.cid, course.match_name)
             except Exception:
                 pm = {}
             if not pm:
@@ -370,7 +372,7 @@ def run_browser(user, pwd, theme_url):
             if state.stop_requested:
                 break
             try:
-                pm = lookup_progress(fetch_progress() or {}, course.cid, course.name)
+                pm = lookup_progress(fetch_progress() or {}, course.cid, course.match_name)
             except Exception:
                 pm = {}
             if (pm.get("learnState") == 2 or (pm.get("progress") or 0) >= 100 or pm.get("finishDate") or course.already_done):
@@ -415,7 +417,8 @@ def run_browser(user, pwd, theme_url):
         pidx = 0
         last_log = time.time()
         last_total = refresh_total()
-        state.log("进入循环补学：轮换观看回放，每 %d 秒报告学习中心累计时长" % LOG_EVERY)
+        if not state.stop_requested:
+            state.log("进入循环补学：轮换观看回放，每 %d 秒报告学习中心累计时长" % LOG_EVERY)
         while not state.stop_requested:
             if state.paused:
                 time.sleep(2)

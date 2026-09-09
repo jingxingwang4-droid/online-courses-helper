@@ -482,5 +482,27 @@ class TestFallbackAmbiguity(unittest.TestCase):
         self.assertEqual(core.fallback_summary(pm), ([], []))
 
 
+class TestFetchThemeCourses(unittest.TestCase):
+    """theme 接口需分离 display_name(展示) 与 match_name(名称兜底)。"""
+
+    def test_separates_display_and_match(self):
+        import cnki_client
+        payload = json.dumps({"data": [
+            {"courseId": 10, "tutorTitle": "张教授：人工智能药学", "courseName": "人工智能药学导论"},
+            {"courseId": 20, "tutorTitle": "吴教授：高等数学", "courseName": "高等数学"},
+        ]})
+        rows = cnki_client.fetch_theme_courses(_FakePage(payload), "2046")
+        self.assertEqual(rows[0], ("10", "张教授：人工智能药学", "人工智能药学导论"))
+        self.assertEqual(rows[1], ("20", "吴教授：高等数学", "高等数学"))
+
+    def test_fallback_uses_course_name_not_tutor_title(self):
+        # progress 缺 ID，只有 courseName
+        pm = core.parse_progress_items([{"courseName": "人工智能药学导论", "progress": 60}])
+        # 用 match_name(courseName) 兜底 -> 命中
+        self.assertEqual(core.progress_for_course_safe(pm, None, "人工智能药学导论", True)["progress"], 60.0)
+        # 若错误地拿 display_name(tutorTitle) 做匹配 -> 命中失败
+        self.assertEqual(core.progress_for_course_safe(pm, None, "张教授：人工智能药学", True), {})
+
+
 if __name__ == "__main__":
     unittest.main()
