@@ -238,5 +238,22 @@ class TestAdvanceFailCount(unittest.TestCase):
         self.assertEqual(core.advance_fail_count(core.advance_fail_count(0, False, 3)[0], True, 3), (0, False))
 
 
+class TestHasFullCreds(unittest.TestCase):
+    """完整凭据 = 同时有账号与密码；缺任一项视为不完整。"""
+
+    def test_both_required(self):
+        self.assertTrue(core.has_full_creds("13800", "pwd"))
+        self.assertFalse(core.has_full_creds("13800", ""))
+        self.assertFalse(core.has_full_creds("", "pwd"))
+        self.assertFalse(core.has_full_creds("", ""))
+
+    def test_single_creds_treated_as_incomplete(self):
+        # 只有账号或只有密码 -> 视为无完整凭据 -> manual（进入 headed 手动登录，而非自动填写）
+        self.assertEqual(core.login_mode(False, core.has_full_creds("u", "")), "manual")
+        self.assertEqual(core.login_mode(False, core.has_full_creds("", "p")), "manual")
+        self.assertEqual(core.login_mode(False, core.has_full_creds("u", "p")), "auto_fill")
+        self.assertEqual(core.login_mode(True, core.has_full_creds("u", "")), "resume")
+
+
 if __name__ == "__main__":
     unittest.main()

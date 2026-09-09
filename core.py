@@ -114,6 +114,11 @@ def is_logged_in_by_body(body):
     return ("学习中心" in body) and ("登录注册" not in body)
 
 
+def has_full_creds(user, pwd):
+    """只有同时提供账号与密码才算“完整凭据”；缺任一项视为不完整。"""
+    return bool(user) and bool(pwd)
+
+
 def login_mode(has_storage, has_creds):
     """根据是否存在有效登录态与是否提供账号密码，决定登录策略。
 

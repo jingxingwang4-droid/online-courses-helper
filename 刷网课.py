@@ -12,6 +12,7 @@ from core import (
     advance_fail_count,
     field_or_current,
     fmt_hms,
+    has_full_creds,
     is_course_complete,
     login_mode,
     parse_creds_text,
@@ -275,6 +276,18 @@ def run_browser(user, pwd, theme_url):
         with state.lock:
             state.courses = courses
 
+        if not courses:
+            state.log("专题下未获取到可学习课程，已停止。")
+            state.write_output()
+            with state.lock:
+                state.done = True
+                state.running = False
+            try:
+                browser.close()
+            except Exception:
+                pass
+            return
+
         def refresh_total():
             with state.lock:
                 state.total_sec = total_learned(c.learn_sec for c in state.courses)
@@ -450,14 +463,14 @@ def worker():
         user = state.account or user
         pwd = state.pwd_input or pwd
         theme_url = state.theme_url
-    has_creds = bool(user) or bool(pwd)
+    has_creds = has_full_creds(user, pwd)
     mode = login_mode(browser_session.has_storage_state(BASE_DIR), has_creds)
     if mode == "resume":
-        state.log("检测到有效登录态（session/storage_state.json），将以 headless 模式直接开始（账号密码非必需）。")
+        state.log("检测到已有登录态文件（session/storage_state.json），将优先尝试以 headless 复用；若失效会自动触发登录。")
     elif mode == "auto_fill":
-        state.log("使用已保存账号密码登录；若登录态失效会弹出可见浏览器供你完成验证。")
+        state.log("检测到完整账号密码，将用于自动填写登录；若登录态失效会弹出可见浏览器供你完成验证。")
     else:
-        state.log("未提供账号密码且无有效登录态：将弹出可见浏览器，请在窗口中手动完成登录。")
+        state.log("未检测到完整账号密码且无可用登录态：将弹出可见浏览器，请在窗口中手动完成登录。")
     try:
         run_browser(user, pwd, theme_url)
     except Exception as e:
