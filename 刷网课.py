@@ -9,14 +9,17 @@ from playwright.sync_api import sync_playwright
 
 from core import (
     DEFAULT_THEME,
+    advance_fail_count,
     field_or_current,
     fmt_hms,
     is_course_complete,
+    login_mode,
     parse_creds_text,
     parse_progress_items,
     parse_theme_url,
     total_learned,
 )
+import browser_session
 from browser_session import ensure_authenticated
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -25,6 +28,7 @@ OUTPUT_DIR = os.path.join(BASE_DIR, "output")
 EXTRA_PLAY_SEC = 60
 CERT_HOURS = 15
 CERT_TOTAL_SECONDS = CERT_HOURS * 3600
+PROGRESS_FAIL_LIMIT = 3  # 连续多少次无法获取服务端进度即视为认证失效并停止本轮
 
 INIT_SCRIPT = r"""
 (() => {
@@ -198,8 +202,9 @@ def run_browser(user, pwd, theme_url):
         refresh_auth()
 
         def get_progress():
+            """返回 {课程名: 进度}（可能为空字典=成功但无数据）；请求/解析失败返回 None。"""
             if not auth.get("authtoken"):
-                return {}
+                return None
             js = ("async (a)=>{try{const r=await fetch('https://k.cnki.net/kedu/course/list',"
                   "{method:'POST',credentials:'include',"
                   "headers:{'Content-Type':'application/json','lid':a.lid,'uid':a.uid,'authtoken':a.authtoken,"
@@ -211,11 +216,22 @@ def run_browser(user, pwd, theme_url):
                 txt = page.evaluate(js, auth)
                 d = json.loads(txt)
                 if not d.get("success"):
-                    return {}
+                    return None
                 items = ((d.get("data") or {}).get("list")) or []
                 return parse_progress_items(items)
             except Exception:
-                return {}
+                return None
+
+        progress_fail = {"count": 0}
+
+        def fetch_progress():
+            """包一层连续失败检测：成功清零，连续 N 次失败即停止本轮并提示重新认证。"""
+            res = get_progress()
+            progress_fail["count"], should_stop = advance_fail_count(progress_fail["count"], res is not None, PROGRESS_FAIL_LIMIT)
+            if should_stop:
+                state.log("连续 %d 次无法获取服务端学习进度，可能登录态或认证 token 已失效；已停止本轮，请重新运行以触发登录流程。" % PROGRESS_FAIL_LIMIT)
+                state.stop_requested = True
+            return res
 
         course_ids = []
         course_names = []
@@ -235,7 +251,7 @@ def run_browser(user, pwd, theme_url):
 
         state.log("共获取 " + str(len(course_ids)) + " 门课程")
 
-        prog_map = get_progress()
+        prog_map = fetch_progress() or {}
         if prog_map:
             state.log("已读取到服务器端学习进度")
         else:
@@ -267,7 +283,7 @@ def run_browser(user, pwd, theme_url):
         def sync_from_server(course):
             """把服务端最新进度回写到 course，并刷新累计时长。注意 0 是合法值，不会回退旧值。"""
             try:
-                pm = get_progress().get(course.name) or {}
+                pm = (fetch_progress() or {}).get(course.name) or {}
             except Exception:
                 pm = {}
             if not pm:
@@ -336,7 +352,7 @@ def run_browser(user, pwd, theme_url):
             if state.stop_requested:
                 break
             try:
-                pm = get_progress().get(course.name) or {}
+                pm = (fetch_progress() or {}).get(course.name) or {}
             except Exception:
                 pm = {}
             if (pm.get("learnState") == 2 or (pm.get("progress") or 0) >= 100 or pm.get("finishDate") or course.already_done):
@@ -434,9 +450,14 @@ def worker():
         user = state.account or user
         pwd = state.pwd_input or pwd
         theme_url = state.theme_url
-    if not user or not pwd:
-        state.log("请填写账号密码")
-        return
+    has_creds = bool(user) or bool(pwd)
+    mode = login_mode(browser_session.has_storage_state(BASE_DIR), has_creds)
+    if mode == "resume":
+        state.log("检测到有效登录态（session/storage_state.json），将以 headless 模式直接开始（账号密码非必需）。")
+    elif mode == "auto_fill":
+        state.log("使用已保存账号密码登录；若登录态失效会弹出可见浏览器供你完成验证。")
+    else:
+        state.log("未提供账号密码且无有效登录态：将弹出可见浏览器，请在窗口中手动完成登录。")
     try:
         run_browser(user, pwd, theme_url)
     except Exception as e:

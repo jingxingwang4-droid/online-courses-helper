@@ -3,7 +3,7 @@
 一个 Windows 下可无人值守、自动观看**知网学术大讲堂**在线课程回放的小工具。
 它使用 Playwright 的无头 Chromium，**1 倍速真实播放**，并通过伪装"页面在前台"绕过站点的前台检测；
 以**服务端 `/kedu/course/list`** 的 `progress / learnState / learnDuration / finishDate` 作为进度的唯一依据。
-内置 GUI 监控器，实时显示每门课进度、总进度与累计学习时长，进度落盘支持断点续学。
+内置 GUI 监控器，实时显示每门课进度、总进度与累计学习时长；运行状态与日志自动落盘，重启后读取服务端已有进度并继续未完成课程。
 
 > ⚠️ 仅供学习自动化 / Playwright 与浏览器自动化研究。请遵守平台规则与课程要求，勿用于违规用途。
 > 请复制 `账号密码.example.md` 为 `账号密码.md` 并填写**你自己的**账号密码；请勿提交真实凭据/登录态。
@@ -15,7 +15,7 @@
 - 自动获取课程列表，逐门打开课程回放，**1 倍速真实播放**（平台限制快进/倍速，故不加速、不拖动）。
 - 绕过"浏览器必须在台前"的限制：最小化或完全被遮挡也按真实时长计时。
 - 以服务端接口判断"已学完/进度"，而非视频 `currentTime`。
-- 进度自动落盘到 `output/<run_id>_progress.json` 与 `output/<run_id>_log.txt`，中断后可续学。
+- 运行状态与日志自动落盘到 `output/<run_id>_progress.json` 与 `output/<run_id>_log.txt`；重新启动后会读取服务端已有学习进度并继续未完成课程。
 - 全部学完后进入**循环补学**，轮换观看回放，每 120 秒上报一次学习中心累计时长（`较上次 +N 秒`）。
 - GUI：开始 / 暂停 / 继续 / 停止；"暂停"会真正暂停播放器，且暂停时间不占用"循环补学每节课 600 秒"的观看额度。
 
@@ -43,8 +43,7 @@
 1. **无头启动 + 防节流参数**（`PLAYER_FLAGS`）：`--mute-audio`、`--disable-background-timer-throttling`、
    `--disable-backgrounding-occluded-windows`、`--disable-renderer-backgrounding`、
    `--disable-features=CalculateNativeWinOcclusion` 等。
-2. **注入脚本伪装前台**（`INIT_SCRIPT`）：覆盖 `document.visibilityState / visibilitychange / hidden / hasFocus`，
-   让页面永远认为窗口已获得焦点且可见。
+2. **注入脚本伪装前台**（`INIT_SCRIPT`）：覆盖/伪造 `document.visibilityState`、`document.hidden`、`document.hasFocus`（页面始终认为在前台且可见），并把 `window.onblur` 置空以屏蔽失焦处理；配合 Chromium 后台节流/遮挡参数。
 3. **捕获认证**：访问学习中心时监听 `GET /kedu/course/list` 请求头，取出 `lid / uid / authtoken`。
 4. **以服务端为准获取进度**：用捕获的认证头 `POST /kedu/course/list`，解析
    `progress`、`learnState`、`duration`、`learnDuration`、`finishDate`。

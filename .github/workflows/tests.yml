@@ -17,6 +17,10 @@ jobs:
         with:
           python-version: "3.11"
 
+      # 先做语法/编译检查，避免仅单测通过却存在入口模块语法错误。
+      - name: Compile check
+        run: python -m py_compile core.py browser_session.py 刷网课.py
+
       # 仅运行纯逻辑单元测试：依赖只有标准库，无需安装 Chromium，也不会访问知网。
       - name: Run unit tests
         run: python -m unittest discover -s tests -v

@@ -112,3 +112,24 @@ def is_logged_in_by_body(body):
     """粗略的登录态文本判定（沿用原逻辑：出现“学习中心”且无“登录注册”）。"""
     body = body or ""
     return ("学习中心" in body) and ("登录注册" not in body)
+
+
+def login_mode(has_storage, has_creds):
+    """根据是否存在有效登录态与是否提供账号密码，决定登录策略。
+
+    返回：
+      "resume"    有有效 storage_state -> 直接 headless 复用（账号密码非必需）
+      "auto_fill" 无 storage_state 但有账号密码 -> headed 自动填写登录
+      "manual"    无 storage_state 且无账号密码 -> headed 手动登录（仍允许继续，不拒绝运行）
+    """
+    if has_storage:
+        return "resume"
+    return "auto_fill" if has_creds else "manual"
+
+
+def advance_fail_count(count, ok, limit):
+    """连续失败计数：成功(ok=True)清零；失败累加。返回 (新计数, 是否达到阈值停止)。"""
+    if ok:
+        return 0, False
+    new = count + 1
+    return new, (new >= limit)

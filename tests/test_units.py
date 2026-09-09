@@ -199,5 +199,44 @@ class TestSessionLogic(unittest.TestCase):
             os.unlink(f.name)
 
 
+class TestLoginMode(unittest.TestCase):
+    """登录策略：账号密码只是自动填写的便利项，不应成为运行的必要条件。"""
+
+    def test_resume_with_storage_no_creds(self):
+        self.assertEqual(core.login_mode(True, False), "resume")
+
+    def test_resume_with_storage_and_creds(self):
+        self.assertEqual(core.login_mode(True, True), "resume")
+
+    def test_auto_fill_no_storage_with_creds(self):
+        self.assertEqual(core.login_mode(False, True), "auto_fill")
+
+    def test_manual_no_storage_no_creds_allows_run(self):
+        # 无 storage 也无账号密码时，仍应允许进入 headed 手动登录，而不是拒绝运行
+        self.assertEqual(core.login_mode(False, False), "manual")
+
+
+class TestAdvanceFailCount(unittest.TestCase):
+    """服务端进度连续失败计数：成功清零，连续达阈值触发停止。"""
+
+    def test_fail_increments(self):
+        self.assertEqual(core.advance_fail_count(0, False, 3), (1, False))
+        self.assertEqual(core.advance_fail_count(1, False, 3), (2, False))
+
+    def test_success_resets_to_zero(self):
+        self.assertEqual(core.advance_fail_count(2, True, 3), (0, False))
+        self.assertEqual(core.advance_fail_count(5, True, 3), (0, False))
+
+    def test_threshold_triggers_stop(self):
+        self.assertEqual(core.advance_fail_count(2, False, 3), (3, True))
+
+    def test_below_threshold_no_stop(self):
+        self.assertEqual(core.advance_fail_count(0, False, 3)[1], False)
+
+    def test_zero_gap_never_stops(self):
+        # 失败后立刻成功，不应累积
+        self.assertEqual(core.advance_fail_count(core.advance_fail_count(0, False, 3)[0], True, 3), (0, False))
+
+
 if __name__ == "__main__":
     unittest.main()

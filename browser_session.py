@@ -80,19 +80,20 @@ def interactive_login(p, flags, init_script, base_dir, user, pwd, theme_url, log
                 time.sleep(2)
             except Exception:
                 pass
-            try:
-                if user:
-                    page.fill("#TextBoxUserName", user)
-                if pwd:
-                    page.fill("#TextBoxPwd", pwd)
+            if user and pwd:
                 try:
-                    page.locator("#agreement").check()
-                except Exception:
-                    pass
-                page.locator("#Button1").click()
-                log("已自动填写账号密码并点击登录；请在窗口中完成剩余验证。")
-            except Exception as e:
-                log("自动填写登录失败，请在窗口中手动登录: " + str(e))
+                    page.fill("#TextBoxUserName", user)
+                    page.fill("#TextBoxPwd", pwd)
+                    try:
+                        page.locator("#agreement").check()
+                    except Exception:
+                        pass
+                    page.locator("#Button1").click()
+                    log("已自动填写账号密码并点击登录；请在窗口中完成剩余验证。")
+                except Exception as e:
+                    log("自动填写登录失败，请在窗口中手动登录: " + str(e))
+            else:
+                log("未检测到账号密码，请在窗口中手动输入并完成登录。")
         deadline = time.time() + LOGIN_WAIT_SEC
         while time.time() < deadline:
             if logged_in(page):
