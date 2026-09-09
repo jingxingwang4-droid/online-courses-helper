@@ -14,9 +14,9 @@
 - 账号密码**仅作为可选自动填写**；无完整账号密码也可完全手动登录。
 - **courseId 优先**关联课程；仅当服务端缺 `courseId` 时才考虑 `courseName` 兜底。
 - 名称兜底有**两层保护**：progress 侧同名歧义不匹配；theme 侧同名多门课不允许兜底（避免串课）。
-- 服务端 `progress / learnDuration` 同步，作为进度的唯一依据。
+- 课程完成状态与累计学习时长**优先以服务端返回值为准**；本地播放器时间主要用于播放控制、轮播节奏与 GUI 展示；若服务端进度连续获取失败则停止本轮。
 - 连续 API 同步失败达到阈值（3 次）即停止本轮并提示重新认证。
-- Phase 1：补学未达 100% 的课程；Phase 2：全部学完后轮播回放补累计时长。
+- Phase 1：依次处理并补学当前未完成课程；Phase 2：Phase 1 遍历结束后，轮换观看课程回放以补充服务端累计学习时长。
 - 默认达到 **15 小时** 累计学习时长自动停止。
 - "暂停" 真正暂停播放器，且暂停时间不计入 Phase 2 每节课的轮播观看时长。
 - 运行日志与状态落盘到 `output/<run_id>_progress.json` 与 `output/<run_id>_log.txt`。
@@ -117,6 +117,7 @@ Windows 双击运行可建一个 `.bat`，如：`start "" "pythonw.exe" 刷网�
 | `browser_session.py` | Playwright 生命周期、storage_state、headed/headless |
 | `tests/` | 纯逻辑单元测试 |
 | `demo.ipynb` | Jupyter 演示：核心逻辑与数据匹配（纯逻辑，可 Run All） |
+| `账号密码.example.md` | 可选账号密码占位模板（复制为 `账号密码.md` 后填写，非必需） |
 | `requirements.txt` | `playwright>=1.40,<2` |
 | `README.md` | 本文件 |
 | `LICENSE` | MIT |
