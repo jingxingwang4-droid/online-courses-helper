@@ -8,19 +8,30 @@ on:
 jobs:
   unit-tests:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
 
-      # 先做语法/编译检查，避免仅单测通过却存在入口模块语法错误。
+      - name: Install requirements
+        run: python -m pip install -r requirements.txt
+
+      # 语法/编译检查：只需编译，无需导入（刷网课.py 依赖 tkinter/playwright，不做 import）。
       - name: Compile check
-        run: python -m py_compile core.py browser_session.py 刷网课.py
+        run: python -m py_compile core.py browser_session.py cnki_client.py 刷网课.py
 
-      # 仅运行纯逻辑单元测试：依赖只有标准库，无需安装 Chromium，也不会访问知网。
+      # 纯逻辑模块可安全 import 检查。
+      - name: Import core modules
+        run: python -c "import core, browser_session, cnki_client"
+
+      # 只跑纯逻辑单元测试：无需 Chromium，也不访问知网。
       - name: Run unit tests
         run: python -m unittest discover -s tests -v

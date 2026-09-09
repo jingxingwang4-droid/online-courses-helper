@@ -15,12 +15,15 @@ from core import (
     has_full_creds,
     is_course_complete,
     login_mode,
+    overall_progress,
     parse_creds_text,
-    parse_progress_items,
     parse_theme_url,
+    progress_for_course,
+    reached_cert_target,
     total_learned,
 )
 import browser_session
+import cnki_client
 from browser_session import ensure_authenticated
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -111,6 +114,7 @@ class State:
         self.start_time = None
         self.total_sec = 0.0
         self.cert_total_sec = CERT_TOTAL_SECONDS
+        self.cert_reached = False
         self.thread = None
 
     def log(self, msg):
@@ -135,6 +139,7 @@ class State:
                 "start_time": self.start_time,
                 "total_sec": self.total_sec,
                 "cert_total_sec": self.cert_total_sec,
+                "cert_reached": self.cert_reached,
             }
 
     def write_output(self):
@@ -181,76 +186,37 @@ def run_browser(user, pwd, theme_url):
             return
         state.log("已就绪（headless 后台播放）。获取课程列表...")
 
-        auth = {"lid": "", "uid": "", "authtoken": ""}
-
-        def refresh_auth():
-            def on_req(r):
-                if "/kedu/course/list" in r.url:
-                    h = r.headers
-                    if h.get("authtoken"):
-                        auth["authtoken"] = h.get("authtoken")
-                        auth["uid"] = h.get("uid")
-                        auth["lid"] = h.get("lid")
-            page.on("request", on_req)
-            try:
-                page.goto("https://k.cnki.net/personal/learnCenter/course", wait_until="networkidle", timeout=60000)
-                time.sleep(5)
-            except Exception:
-                pass
-            page.remove_listener("request", on_req)
-
-        state.log("读取学习中心进度...")
-        refresh_auth()
-
-        def get_progress():
-            """返回 {课程名: 进度}（可能为空字典=成功但无数据）；请求/解析失败返回 None。"""
-            if not auth.get("authtoken"):
-                return None
-            js = ("async (a)=>{try{const r=await fetch('https://k.cnki.net/kedu/course/list',"
-                  "{method:'POST',credentials:'include',"
-                  "headers:{'Content-Type':'application/json','lid':a.lid,'uid':a.uid,'authtoken':a.authtoken,"
-                  "'edutoken':a.authtoken,'noticetoken':a.authtoken,'orgtoken':a.authtoken,'classtoken':a.authtoken,"
-                  "'examtoken':a.authtoken,'x-auth':'true'},"
-                  "body:JSON.stringify({courseTypeID:null,courseType:null,orderType:1,courseName:'',learnType:null,page:1,rows:100,total:0})});"
-                  "return await r.text();}catch(e){return '{\"ok\":false}';}}")
-            try:
-                txt = page.evaluate(js, auth)
-                d = json.loads(txt)
-                if not d.get("success"):
-                    return None
-                items = ((d.get("data") or {}).get("list")) or []
-                return parse_progress_items(items)
-            except Exception:
-                return None
+        state.log("读取学习中心认证信息...")
+        try:
+            auth = cnki_client.capture_auth(page)
+        except Exception as e:
+            state.log("读取学习中心失败，无法获取认证 token，将按无进度继续: " + str(e))
+            auth = {"lid": "", "uid": "", "authtoken": ""}
+        if not auth.get("authtoken"):
+            state.log("未捕获到 authtoken（仅能按视频时长继续，进度同步可能受限）。")
+        else:
+            state.log("认证信息读取完成。")
 
         progress_fail = {"count": 0}
 
         def fetch_progress():
             """包一层连续失败检测：成功清零，连续 N 次失败即停止本轮并提示重新认证。"""
-            res = get_progress()
+            res = cnki_client.fetch_progress(page, auth)
             progress_fail["count"], should_stop = advance_fail_count(progress_fail["count"], res is not None, PROGRESS_FAIL_LIMIT)
             if should_stop:
                 state.log("连续 %d 次无法获取服务端学习进度，可能登录态或认证 token 已失效；已停止本轮，请重新运行以触发登录流程。" % PROGRESS_FAIL_LIMIT)
                 state.stop_requested = True
             return res
 
-        course_ids = []
-        course_names = []
+        courses_data = []
         try:
-            body = page.evaluate(
-                "async (u)=>{const r=await fetch(u,{credentials:'include'});return await r.text();}",
-                f"https://k.cnki.net/kedu/theme/course?id={theme_id}",
-            )
-            data = json.loads(body)["data"]
-            for item in data:
-                course_ids.append(str(item["courseId"]))
-                course_names.append(item.get("tutorTitle", "") or item.get("courseName", ""))
+            courses_data = cnki_client.fetch_theme_courses(page, theme_id)
         except Exception as e:
             state.log("获取课程列表失败: " + str(e))
             state.running = False
             return
 
-        state.log("共获取 " + str(len(course_ids)) + " 门课程")
+        state.log("共获取 " + str(len(courses_data)) + " 门课程")
 
         prog_map = fetch_progress() or {}
         if prog_map:
@@ -259,8 +225,8 @@ def run_browser(user, pwd, theme_url):
             state.log("未能读取服务器进度，将按视频时长继续")
 
         courses = []
-        for cid, name in zip(course_ids, course_names):
-            pm = prog_map.get(name) or {}
+        for cid, name in courses_data:
+            pm = progress_for_course(prog_map, cid, name)
             target = pm["duration"] if pm.get("duration") is not None else 6300.0
             course = Course(cid, name, target)
             if pm:
@@ -296,7 +262,7 @@ def run_browser(user, pwd, theme_url):
         def sync_from_server(course):
             """把服务端最新进度回写到 course，并刷新累计时长。注意 0 是合法值，不会回退旧值。"""
             try:
-                pm = (fetch_progress() or {}).get(course.name) or {}
+                pm = progress_for_course(fetch_progress() or {}, course.cid, course.name)
             except Exception:
                 pm = {}
             if not pm:
@@ -315,9 +281,29 @@ def run_browser(user, pwd, theme_url):
             except Exception:
                 pass
 
+        target_reached = {"v": False}
+
+        def maybe_stop_at_target():
+            """服务端累计学习时长达到目标即停止（含滞留判断，避免目标附近反复启停）。"""
+            if target_reached["v"]:
+                return True
+            with state.lock:
+                reached = reached_cert_target(state.total_sec, CERT_TOTAL_SECONDS)
+            if reached:
+                target_reached["v"] = True
+                with state.lock:
+                    state.cert_reached = True
+                    state.done = True
+                    state.stop_requested = True
+                state.log("累计学习时长已达 %s，达到证书目标，已停止补学。" % fmt_hms(CERT_TOTAL_SECONDS))
+                state.write_output()
+                return True
+            return False
+
         refresh_total()
         state.log("累计学习时长: %s / %s（证书要求）" % (fmt_hms(state.total_sec), fmt_hms(CERT_TOTAL_SECONDS)))
         state.write_output()
+        maybe_stop_at_target()
 
 
 
@@ -365,7 +351,7 @@ def run_browser(user, pwd, theme_url):
             if state.stop_requested:
                 break
             try:
-                pm = (fetch_progress() or {}).get(course.name) or {}
+                pm = progress_for_course(fetch_progress() or {}, course.cid, course.name)
             except Exception:
                 pm = {}
             if (pm.get("learnState") == 2 or (pm.get("progress") or 0) >= 100 or pm.get("finishDate") or course.already_done):
@@ -392,6 +378,8 @@ def run_browser(user, pwd, theme_url):
                     last_check = time.time()
                     pm = sync_from_server(course)
                     refresh_total()
+                    if maybe_stop_at_target():
+                        break
                     if is_course_complete(pm):
                         with state.lock:
                             course.status = "已完成"
@@ -447,6 +435,7 @@ def run_browser(user, pwd, theme_url):
                     state.log("累计学习时长: %s / %s　(较上次 %+d 秒)" % (fmt_hms(new_total), fmt_hms(CERT_TOTAL_SECONDS), int(new_total - last_total)))
                     last_total = new_total
                     state.write_output()
+                    maybe_stop_at_target()
                 time.sleep(5)
 
         with state.lock:
@@ -579,18 +568,15 @@ def build_gui():
         snap = state.snapshot()
         for row in table.get_children():
             table.delete(row)
-        total = 0.0
         remain_total = 0
         for c in snap["courses"]:
-            total += c["percent"]
             if c["status"] == "已完成":
                 remain = 0
             else:
                 remain = max(0, int(c["target"] - max(c["watched"], c["server_watched"])))
             remain_total += remain
             table.insert("", "end", values=(c["name"], round(c["target"] / 60), round(c["watched"] / 60), round(remain / 60), f"{c['percent']:.1f}%", c["status"]))
-        cnt = len(snap["courses"])
-        overall = (total / cnt) if cnt else 0.0
+        overall = overall_progress(snap["courses"])
         bar["value"] = overall
         cert_line = "    累计学习: %s / %s" % (fmt_secs(snap["total_sec"]), fmt_secs(snap["cert_total_sec"]))
         if snap["running"] and not snap["done"] and remain_total:
@@ -600,6 +586,8 @@ def build_gui():
             overall_lbl.config(text="总进度: %.1f%%%s" % (overall, cert_line))
         if snap["paused"]:
             state_lbl.config(text="状态: 已暂停", foreground="#e67e22")
+        elif snap["cert_reached"]:
+            state_lbl.config(text="状态: 已达到目标学习时长", foreground="#2ecc71")
         elif snap["done"]:
             state_lbl.config(text="状态: 完成", foreground="#2ecc71")
         elif snap["running"]:

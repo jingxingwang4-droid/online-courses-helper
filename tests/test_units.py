@@ -68,21 +68,44 @@ class TestFmtHms(unittest.TestCase):
 class TestParseProgressItems(unittest.TestCase):
     def test_basic(self):
         items = [
-            {"courseName": "A", "progress": 73.0, "learnState": 1, "duration": 6300, "learnDuration": 4600, "finishDate": None},
-            {"courseName": "B", "progress": 100.0, "learnState": 2, "duration": 8100, "learnDuration": 8100, "finishDate": "2026-09-06"},
+            {"courseId": 1, "courseName": "A", "progress": 73.0, "learnState": 1, "duration": 6300, "learnDuration": 4600, "finishDate": None},
+            {"courseId": 2, "courseName": "B", "progress": 100.0, "learnState": 2, "duration": 8100, "learnDuration": 8100, "finishDate": "2026-09-06"},
         ]
         out = core.parse_progress_items(items)
-        self.assertEqual(set(out.keys()), {"A", "B"})
-        self.assertEqual(out["A"]["progress"], 73.0)
-        self.assertEqual(out["A"]["learnDuration"], 4600)
-        self.assertEqual(out["B"]["learnState"], 2)
+        self.assertEqual(set(out.keys()), {"1", "2"})
+        self.assertEqual(out["1"]["progress"], 73.0)
+        self.assertEqual(out["1"]["learnDuration"], 4600)
+        self.assertEqual(out["1"]["name"], "A")
+        self.assertEqual(out["2"]["learnState"], 2)
 
-    def test_empty_name_skipped(self):
+    def test_keyed_by_id_not_name(self):
+        # 两个同名但 ID 不同的课程，必须互不串课
+        out = core.parse_progress_items([
+            {"courseId": 10, "courseName": "同名课", "progress": 20, "learnDuration": 1200},
+            {"courseId": 11, "courseName": "同名课", "progress": 80, "learnDuration": 4800},
+        ])
+        self.assertEqual(set(out.keys()), {"10", "11"})
+        self.assertEqual(out["10"]["progress"], 20.0)
+        self.assertEqual(out["11"]["progress"], 80.0)
+
+    def test_fallback_name_when_no_id(self):
+        out = core.parse_progress_items([{"courseName": "孤立课", "progress": 50}])
+        self.assertEqual(set(out.keys()), {"name:孤立课"})
+        self.assertEqual(out["name:孤立课"]["cid"], "")
+
+    def test_empty_name_and_no_id_skipped(self):
         out = core.parse_progress_items([{"courseName": "  ", "progress": 1}])
         self.assertEqual(len(out), 0)
 
     def test_none_returns_empty(self):
         self.assertEqual(core.parse_progress_items(None), {})
+
+    def test_missing_fields_use_defaults(self):
+        out = core.parse_progress_items([{"courseId": 9, "courseName": "缺损"}])
+        e = out["9"]
+        self.assertEqual((e["progress"], e["learnDuration"]), (0.0, 0))
+        self.assertEqual(e["duration"], 6300.0)
+        self.assertEqual(e["finishDate"], None)
 
 
 class TestIsCourseComplete(unittest.TestCase):
@@ -143,19 +166,19 @@ class TestParseZeroValid(unittest.TestCase):
     """服务端 0 是合法值，不应被当作缺失回退默认。"""
 
     def test_progress_zero(self):
-        self.assertEqual(core.parse_progress_items([{"courseName": "A", "progress": 0}])["A"]["progress"], 0.0)
+        self.assertEqual(core.parse_progress_items([{"courseId": 1, "courseName": "A", "progress": 0}])["1"]["progress"], 0.0)
 
     def test_learn_duration_zero(self):
-        out = core.parse_progress_items([{"courseName": "A", "progress": 0, "learnDuration": 0}])
-        self.assertEqual(out["A"]["learnDuration"], 0)
-        self.assertEqual(out["A"]["progress"], 0.0)
+        out = core.parse_progress_items([{"courseId": 1, "courseName": "A", "progress": 0, "learnDuration": 0}])
+        self.assertEqual(out["1"]["learnDuration"], 0)
+        self.assertEqual(out["1"]["progress"], 0.0)
 
     def test_duration_zero_kept(self):
-        self.assertEqual(core.parse_progress_items([{"courseName": "A", "duration": 0}])["A"]["duration"], 0.0)
+        self.assertEqual(core.parse_progress_items([{"courseId": 1, "courseName": "A", "duration": 0}])["1"]["duration"], 0.0)
 
     def test_none_defaults(self):
-        out = core.parse_progress_items([{"courseName": "A", "progress": None, "learnDuration": None, "duration": None}])
-        self.assertEqual((out["A"]["progress"], out["A"]["learnDuration"], out["A"]["duration"]), (0.0, 0, 6300.0))
+        out = core.parse_progress_items([{"courseId": 1, "courseName": "A", "progress": None, "learnDuration": None, "duration": None}])
+        self.assertEqual((out["1"]["progress"], out["1"]["learnDuration"], out["1"]["duration"]), (0.0, 0, 6300.0))
 
     def test_complete_even_with_zero(self):
         self.assertTrue(core.is_course_complete({"learnState": 2, "progress": 0, "learnDuration": 0}))
@@ -253,6 +276,127 @@ class TestHasFullCreds(unittest.TestCase):
         self.assertEqual(core.login_mode(False, core.has_full_creds("", "p")), "manual")
         self.assertEqual(core.login_mode(False, core.has_full_creds("u", "p")), "auto_fill")
         self.assertEqual(core.login_mode(True, core.has_full_creds("u", "")), "resume")
+
+
+class TestProgressForCourse(unittest.TestCase):
+    """按课程 ID 取进度；ID 未命中/缺失时回退课程名。"""
+
+    def _map(self):
+        return core.parse_progress_items([
+            {"courseId": 10, "courseName": "同名", "progress": 30, "learnDuration": 1800, "duration": 6000},
+            {"courseId": 11, "courseName": "同名", "progress": 90, "learnDuration": 5400, "duration": 6000},
+        ])
+
+    def test_lookup_by_id(self):
+        pm = self._map()
+        self.assertEqual(core.progress_for_course(pm, 10, "同名")["progress"], 30.0)
+        self.assertEqual(core.progress_for_course(pm, 11, "同名")["progress"], 90.0)
+
+    def test_duplicate_names_not_merged(self):
+        pm = self._map()
+        self.assertNotEqual(core.progress_for_course(pm, 10, "同名")["progress"], core.progress_for_course(pm, 11, "同名")["progress"])
+
+    def test_fallback_by_name_when_id_absent(self):
+        pm = core.parse_progress_items([{"courseName": "孤立", "progress": 55}])
+        self.assertEqual(core.progress_for_course(pm, None, "孤立")["progress"], 55.0)
+        # ID 不在 map 里但名称命中，也应回退成功
+        self.assertEqual(core.progress_for_course(pm, 99999, "孤立")["progress"], 55.0)
+
+    def test_missing_returns_empty(self):
+        self.assertEqual(core.progress_for_course({}, 1, "无"), {})
+        self.assertEqual(core.progress_for_course(None, 1, "无"), {})
+
+
+class TestOverallProgress(unittest.TestCase):
+    """总进度为按课程时长加权，且限制在 0~100%。"""
+
+    def test_weighted_vs_arithmetic(self):
+        # 两门课：A 4800秒学满(100%)，B 12000秒只有一半(50%)。时长加权应偏大。
+        entries = [
+            {"learn_sec": 4800, "target": 4800},
+            {"learn_sec": 6000, "target": 12000},
+        ]
+        self.assertAlmostEqual(core.overall_progress(entries), (4800 + 6000) / (4800 + 12000) * 100.0)
+
+    def test_empty_returns_zero(self):
+        self.assertEqual(core.overall_progress([]), 0.0)
+        self.assertEqual(core.overall_progress(None), 0.0)
+
+    def test_zero_and_missing_duration_fallback_no_exception(self):
+        entries = [
+            {"learn_sec": 3000, "target": 0},       # 0 时长 -> 兜底不崩
+            {"learn_sec": 2000, "target": None},    # 缺失 -> 兜底不崩
+        ]
+        pct = core.overall_progress(entries)
+        self.assertIsInstance(pct, float)
+        self.assertTrue(0.0 <= pct <= 100.0)
+
+    def test_clamped_to_100(self):
+        entries = [{"learn_sec": 999999, "target": 5000}]
+        self.assertEqual(core.overall_progress(entries), 100.0)
+
+    def test_over_watch_capped_per_course(self):
+        entries = [{"learn_sec": 8000, "target": 4000}]
+        self.assertEqual(core.overall_progress(entries), 100.0)
+
+
+class TestReachedCertTarget(unittest.TestCase):
+    def test_below(self):
+        self.assertFalse(core.reached_cert_target(53999, 54000))
+
+    def test_at(self):
+        self.assertTrue(core.reached_cert_target(54000, 54000))
+
+    def test_above(self):
+        self.assertTrue(core.reached_cert_target(60000, 54000))
+
+    def test_zero_target_never_reached(self):
+        self.assertFalse(core.reached_cert_target(100, 0))
+
+    def test_none_safe(self):
+        self.assertFalse(core.reached_cert_target(None, 54000))
+
+
+class _FakePage:
+    """极简 fake page：只提供 fetch_progress 所需的 evaluate 返回字符串。"""
+
+    def __init__(self, payload):
+        self._payload = payload
+
+    def evaluate(self, *args, **kwargs):
+        return self._payload
+
+
+class TestCnkiClientProgress(unittest.TestCase):
+    """cnki_client.fetch_progress 与页面数据解耦（fake page 注入），覆盖空列表/缺失/异常。"""
+
+    def test_success_parse(self):
+        import cnki_client
+        payload = json.dumps({"success": True, "data": {"list": [{"courseId": 1, "courseName": "A", "progress": 73, "learnDuration": 4600, "duration": 6300}]}})
+        auth = {"lid": "l", "uid": "u", "authtoken": "t"}
+        res = cnki_client.fetch_progress(_FakePage(payload), auth)
+        self.assertEqual(res["1"]["progress"], 73.0)
+        self.assertEqual(res["1"]["learnDuration"], 4600)
+
+    def test_empty_list_is_success(self):
+        import cnki_client
+        payload = json.dumps({"success": True, "data": {"list": []}})
+        self.assertEqual(cnki_client.fetch_progress(_FakePage(payload), {"authtoken": "t"}), {})
+
+    def test_missing_fields_default(self):
+        import cnki_client
+        payload = json.dumps({"success": True, "data": {"list": [{"courseId": 2, "courseName": "B"}]}})
+        res = cnki_client.fetch_progress(_FakePage(payload), {"authtoken": "t"})
+        self.assertEqual((res["2"]["progress"], res["2"]["learnDuration"]), (0.0, 0))
+
+    def test_bad_json_returns_none(self):
+        import cnki_client
+        self.assertIsNone(cnki_client.fetch_progress(_FakePage("not json"), {"authtoken": "t"}))
+        self.assertIsNone(cnki_client.fetch_progress(_FakePage(json.dumps({"success": False})), {"authtoken": "t"}))
+
+    def test_no_token_returns_none(self):
+        import cnki_client
+        self.assertIsNone(cnki_client.fetch_progress(_FakePage("{}"), {"authtoken": ""}))
 
 
 if __name__ == "__main__":

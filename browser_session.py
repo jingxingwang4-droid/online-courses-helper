@@ -23,11 +23,24 @@ def has_storage_state(base_dir):
 
 
 def logged_in(page):
+    """判断是否已登录。
+
+    提高可靠性：先排除明确的“未登录”信号（登录页 URL / 登录表单可见），
+    再回退到页面文字判定。三者都是启发式，失败时保留 headed 人工登录 fallback。
+    """
     try:
+        if "login.cnki.net" in (page.url or ""):
+            return False
+        try:
+            login_input = page.locator("#TextBoxUserName")
+            if login_input.count() > 0 and login_input.first.is_visible():
+                return False
+        except Exception:
+            pass
         body = page.inner_text("body")
+        return core.is_logged_in_by_body(body)
     except Exception:
         return False
-    return core.is_logged_in_by_body(body)
 
 
 def save_storage_state(page, base_dir):

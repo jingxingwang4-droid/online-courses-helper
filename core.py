@@ -63,16 +63,22 @@ def field_or_current(entry, key, current, cast):
 
 
 def parse_progress_items(items):
-    """把服务端 /kedu/course/list 的 list 映射为 {课程名: {...}}。
+    """把服务端 /kedu/course/list 的 list 映射为 {课程稳定key: {...}}。
 
+    优先以 courseId 作唯一键；若条目缺失 courseId，则回退用"name:<课程名>"兜底（并输出到 entry["cid"] 为空）。
+    课程名称只用于展示/日志，不参与唯一标识，避免同名课程进度串课。
     progress / learnDuration 的 0 被保留为合法值；仅 None 才回退默认。
     """
     out = {}
     for it in items or []:
+        cid = it.get("courseId")
         name = (it.get("courseName") or "").strip()
-        if not name:
+        if cid is None and not name:
             continue
-        out[name] = {
+        key = str(cid) if cid is not None else "name:" + name
+        out[key] = {
+            "cid": str(cid) if cid is not None else "",
+            "name": name,
             "progress": _num(it.get("progress"), float, 0.0),
             "learnState": it.get("learnState"),
             "duration": _num(it.get("duration"), float, DEFAULT_DURATION),
@@ -80,6 +86,55 @@ def parse_progress_items(items):
             "finishDate": it.get("finishDate"),
         }
     return out
+
+
+def progress_for_course(prog_map, cid, name):
+    """按课程 ID 取进度条目；ID 缺失/未命中时用课程名兜底。找不到返回空 dict。
+
+    prog_map 由 parse_progress_items 生成（key 为 str(cid) 或 "name:<name>"）。
+    """
+    if not isinstance(prog_map, dict):
+        return {}
+    if cid is not None:
+        v = prog_map.get(str(cid))
+        if v is not None:
+            return v
+    name = (name or "").strip()
+    if name:
+        v = prog_map.get("name:" + name)
+        if v is not None:
+            return v
+    return {}
+
+
+def overall_progress(entries):
+    """按课程时长加权的总进度（百分比，限制在 0~100）。
+
+    entries: 每个元素是 dict，含 "learn_sec"(已学秒) 与 "target"(课程时长秒)。
+    处理：时长缺失/为 0/非法 -> 用 DEFAULT_DURATION 兜底，不抛异常；全无课程 -> 0。
+    """
+    total_target = 0.0
+    total_learned = 0.0
+    for e in entries or []:
+        target = e.get("target")
+        target = _num(target, float, DEFAULT_DURATION)
+        if target <= 0:
+            target = DEFAULT_DURATION
+        learned = _num(e.get("learn_sec"), float, 0.0)
+        learned = max(0.0, min(learned, target))  # 单课贡献不超过其时长，避免超 100%
+        total_target += target
+        total_learned += learned
+    if total_target <= 0:
+        return 0.0
+    pct = total_learned / total_target * 100.0
+    return max(0.0, min(100.0, pct))
+
+
+def reached_cert_target(total_sec, cert_total_sec):
+    """服务端累计学习时长是否已达到证书目标（以服务端为准）。"""
+    total_sec = _num(total_sec, float, 0.0)
+    cert_total_sec = _num(cert_total_sec, float, 0.0)
+    return cert_total_sec > 0 and total_sec >= cert_total_sec
 
 
 def is_course_complete(entry):
