@@ -1,0 +1,18 @@
+# 凭据与敏感信息（切勿提交）
+账号密码.md
+session.json
+session_xuetangx.json
+cookies.txt
+*.log
+progress.json
+
+# 生成产物 / 浏览器配置 / 缓存
+output/
+chrome_profile/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.zip
+
+# 雨课堂项目（不公开）
+工程伦理/
