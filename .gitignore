@@ -6,6 +6,10 @@ cookies.txt
 *.log
 progress.json
 
+# 登录态存储（Playwright storage_state，敏感本地文件）
+session/
+*storage_state*.json
+
 # 生成产物 / 浏览器配置 / 缓存
 output/
 chrome_profile/

@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """无需浏览器的纯逻辑单元测试。运行：python -m unittest discover -s tests -v"""
+import json
 import os
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -110,6 +112,91 @@ class TestTotalLearned(unittest.TestCase):
 
     def test_nulls(self):
         self.assertEqual(core.total_learned([100, None, 50]), 150.0)
+
+
+class TestFieldOrCurrent(unittest.TestCase):
+    """严格合并：0 是合法值，None/缺失才回退旧值。"""
+
+    def test_zero_is_kept(self):
+        self.assertEqual(core.field_or_current({"learnDuration": 0}, "learnDuration", 500.0, float), 0.0)
+
+    def test_none_keeps_current(self):
+        self.assertEqual(core.field_or_current({"learnDuration": None}, "learnDuration", 500.0, float), 500.0)
+
+    def test_missing_keeps_current(self):
+        self.assertEqual(core.field_or_current({}, "learnDuration", 7.0, float), 7.0)
+
+    def test_value_used(self):
+        self.assertEqual(core.field_or_current({"progress": 73}, "progress", 0.0, float), 73.0)
+
+    def test_cast_string(self):
+        self.assertEqual(core.field_or_current({"learnDuration": "120"}, "learnDuration", 0, int), 120)
+
+    def test_non_dict_entry(self):
+        self.assertEqual(core.field_or_current(None, "x", 3.0, float), 3.0)
+
+    def test_bad_cast_keeps_current(self):
+        self.assertEqual(core.field_or_current({"progress": "abc"}, "progress", 9.9, float), 9.9)
+
+
+class TestParseZeroValid(unittest.TestCase):
+    """服务端 0 是合法值，不应被当作缺失回退默认。"""
+
+    def test_progress_zero(self):
+        self.assertEqual(core.parse_progress_items([{"courseName": "A", "progress": 0}])["A"]["progress"], 0.0)
+
+    def test_learn_duration_zero(self):
+        out = core.parse_progress_items([{"courseName": "A", "progress": 0, "learnDuration": 0}])
+        self.assertEqual(out["A"]["learnDuration"], 0)
+        self.assertEqual(out["A"]["progress"], 0.0)
+
+    def test_duration_zero_kept(self):
+        self.assertEqual(core.parse_progress_items([{"courseName": "A", "duration": 0}])["A"]["duration"], 0.0)
+
+    def test_none_defaults(self):
+        out = core.parse_progress_items([{"courseName": "A", "progress": None, "learnDuration": None, "duration": None}])
+        self.assertEqual((out["A"]["progress"], out["A"]["learnDuration"], out["A"]["duration"]), (0.0, 0, 6300.0))
+
+    def test_complete_even_with_zero(self):
+        self.assertTrue(core.is_course_complete({"learnState": 2, "progress": 0, "learnDuration": 0}))
+
+
+class TestSessionLogic(unittest.TestCase):
+    """登录态相关纯逻辑：路径、文本判定、安全 JSON 读取。"""
+
+    def test_logged_in_body(self):
+        self.assertTrue(core.is_logged_in_by_body("学习中心 我的课程"))
+        self.assertFalse(core.is_logged_in_by_body("首页 登录注册"))
+        self.assertFalse(core.is_logged_in_by_body(None))
+
+    def test_storage_path_shape(self):
+        p = core.storage_state_path(r"E:\proj")
+        self.assertTrue(p.endswith(os.path.join("session", "storage_state.json")))
+        self.assertTrue(p.startswith(r"E:\proj"))
+
+    def test_load_json_safe_missing(self):
+        p = os.path.join(tempfile.gettempdir(), "__opencode_no_such.json")
+        if os.path.exists(p):
+            os.unlink(p)
+        self.assertEqual(core.load_json_safe(p, "DEFAULT"), "DEFAULT")
+
+    def test_load_json_safe_corrupt(self):
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+        f.write("{ broken json !!!")
+        f.close()
+        try:
+            self.assertIsNone(core.load_json_safe(f.name, None))
+        finally:
+            os.unlink(f.name)
+
+    def test_load_json_safe_valid(self):
+        f = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+        json.dump({"cookies": [], "origins": []}, f)
+        f.close()
+        try:
+            self.assertEqual(core.load_json_safe(f.name), {"cookies": [], "origins": []})
+        finally:
+            os.unlink(f.name)
 
 
 if __name__ == "__main__":

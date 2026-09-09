@@ -9,6 +9,7 @@ from playwright.sync_api import sync_playwright
 
 from core import (
     DEFAULT_THEME,
+    field_or_current,
     fmt_hms,
     is_course_complete,
     parse_creds_text,
@@ -16,6 +17,7 @@ from core import (
     parse_theme_url,
     total_learned,
 )
+from browser_session import ensure_authenticated
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CRED_FILE = os.path.join(BASE_DIR, "账号密码.md")
@@ -62,7 +64,7 @@ class Course:
     def __init__(self, cid, name, target):
         self.cid = cid
         self.name = name
-        self.target = target or 6300.0
+        self.target = target if target is not None else 6300.0
         self.watched = 0.0
         self.server_watched = 0.0
         self.server_complete = False
@@ -167,38 +169,12 @@ def run_browser(user, pwd, theme_url):
         state.theme_id = theme_id
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=PLAYER_FLAGS)
-        ctx = browser.new_context(viewport={"width": 1280, "height": 800}, locale="zh-CN")
-        ctx.add_init_script(INIT_SCRIPT)
-        page = ctx.new_page()
-        state.log("已启动隐藏浏览器，开始登录...")
-
-        def login():
-            page.goto(theme_url, wait_until="networkidle", timeout=60000)
-            time.sleep(2)
-            body = page.inner_text("body")
-            if "学习中心" in body and "登录注册" not in body:
-                return True
-            with page.expect_navigation(timeout=15000):
-                page.get_by_text("登录", exact=False).last.click()
-            time.sleep(3)
-            page.fill("#TextBoxUserName", user)
-            page.fill("#TextBoxPwd", pwd)
-            try:
-                page.locator("#agreement").check()
-            except Exception:
-                pass
-            time.sleep(0.5)
-            page.locator("#Button1").click()
-            time.sleep(6)
-            return "login.cnki.net" not in page.url
-
-        if not login():
-            state.log("登录失败，请检查账号密码")
+        browser, ctx, page = ensure_authenticated(p, PLAYER_FLAGS, INIT_SCRIPT, BASE_DIR, user, pwd, theme_url, state.log)
+        if browser is None:
+            state.log("无法完成登录，已停止。若要登录请检查账号密码或等待可见浏览器窗口完成登录。")
             state.running = False
             return
-
-        state.log("登录成功，获取课程列表...")
+        state.log("已就绪（headless 后台播放）。获取课程列表...")
 
         auth = {"lid": "", "uid": "", "authtoken": ""}
 
@@ -268,13 +244,14 @@ def run_browser(user, pwd, theme_url):
         courses = []
         for cid, name in zip(course_ids, course_names):
             pm = prog_map.get(name) or {}
-            target = pm.get("duration") or 6300.0
+            target = pm["duration"] if pm.get("duration") is not None else 6300.0
             course = Course(cid, name, target)
             if pm:
-                pct = pm.get("progress") or 0.0
+                pct = pm["progress"] if pm.get("progress") is not None else 0.0
                 course.percent = float(pct)
                 course.watched = target * pct / 100.0
-                course.learn_sec = float(pm.get("learnDuration") or target * pct / 100.0)
+                ls = pm["learnDuration"] if pm.get("learnDuration") is not None else target * pct / 100.0
+                course.learn_sec = float(ls)
                 course.server_watched = course.learn_sec
                 course.already_done = is_course_complete(pm)
             courses.append(course)
@@ -288,7 +265,7 @@ def run_browser(user, pwd, theme_url):
             return state.total_sec
 
         def sync_from_server(course):
-            """把服务端最新进度回写到 course，并刷新累计时长。"""
+            """把服务端最新进度回写到 course，并刷新累计时长。注意 0 是合法值，不会回退旧值。"""
             try:
                 pm = get_progress().get(course.name) or {}
             except Exception:
@@ -296,8 +273,8 @@ def run_browser(user, pwd, theme_url):
             if not pm:
                 return pm
             with state.lock:
-                course.learn_sec = float(pm.get("learnDuration") or course.learn_sec)
-                course.percent = float(pm.get("progress") or course.percent)
+                course.learn_sec = field_or_current(pm, "learnDuration", course.learn_sec, float)
+                course.percent = field_or_current(pm, "progress", course.percent, float)
                 course.server_watched = course.learn_sec
                 course.watched = course.target * course.percent / 100.0
                 course.server_complete = is_course_complete(pm)
@@ -349,14 +326,9 @@ def run_browser(user, pwd, theme_url):
 
         def relogin_if_needed(course):
             if "login.cnki.net" in page.url:
-                state.log("会话已过期，重新登录后继续...")
-                if login():
-                    refresh_auth()
-                    try:
-                        open_course(course)
-                        return True
-                    except Exception:
-                        return False
+                state.log("会话已过期（已跳转到登录页）。停止本轮；请重新运行以触发 headed 登录流程。")
+                state.stop_requested = True
+                return False
             return True
 
         # Phase 1: finish any course not yet 100%
@@ -425,12 +397,17 @@ def run_browser(user, pwd, theme_url):
                 time.sleep(3)
                 continue
             last = [time.time()]
-            seg_start = time.time()
-            while not state.stop_requested and (time.time() - seg_start < WATCH_EACH):
+            last_tick = time.time()
+            active_accum = 0.0
+            while not state.stop_requested and active_accum < WATCH_EACH:
                 if state.paused:
                     pause_video()
-                    time.sleep(2)
+                    time.sleep(1)
+                    last_tick = time.time()
                     continue
+                now = time.time()
+                active_accum += (now - last_tick)
+                last_tick = now
                 if not relogin_if_needed(course):
                     break
                 keep_alive(last)

@@ -1,8 +1,15 @@
 # -*- coding: utf-8 -*-
 """纯逻辑工具，不含 Playwright / tkinter，便于单测与复用。"""
+import json
+import os
 import re
 
 DEFAULT_THEME = "https://k.cnki.net/themeInfo/2046"
+
+# 登录态存储目录与文件名（敏感本地文件，已被 .gitignore 忽略）
+SESSION_DIR = "session"
+STORAGE_STATE_FILE = "storage_state.json"
+DEFAULT_DURATION = 6300.0  # 服务端缺失时长时的兜底（秒）
 
 
 def fmt_hms(sec):
@@ -33,18 +40,43 @@ def parse_creds_text(text):
     return (um.group(1).strip() if um else ""), (pm.group(1).strip() if pm else "")
 
 
+def _num(value, cast, default):
+    """严格取值：None -> default；0 是合法值，保留；解析失败 -> default。"""
+    if value is None:
+        return default
+    try:
+        return cast(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def field_or_current(entry, key, current, cast):
+    """合并服务端字段：key 缺失或为 None 时保留 current，否则用 cast 后的服务端值。
+    “0”是合法值，不会被当作缺失。"""
+    v = entry.get(key) if isinstance(entry, dict) else None
+    if v is None:
+        return current
+    try:
+        return cast(v)
+    except (TypeError, ValueError):
+        return current
+
+
 def parse_progress_items(items):
-    """把服务端 /kedu/course/list 的 list 映射为 {课程名: {...}}。"""
+    """把服务端 /kedu/course/list 的 list 映射为 {课程名: {...}}。
+
+    progress / learnDuration 的 0 被保留为合法值；仅 None 才回退默认。
+    """
     out = {}
     for it in items or []:
         name = (it.get("courseName") or "").strip()
         if not name:
             continue
         out[name] = {
-            "progress": float(it.get("progress") or 0.0),
+            "progress": _num(it.get("progress"), float, 0.0),
             "learnState": it.get("learnState"),
-            "duration": float(it.get("duration") or 0) or 6300.0,
-            "learnDuration": int(it.get("learnDuration") or 0),
+            "duration": _num(it.get("duration"), float, DEFAULT_DURATION),
+            "learnDuration": _num(it.get("learnDuration"), int, 0),
             "finishDate": it.get("finishDate"),
         }
     return out
@@ -60,3 +92,23 @@ def is_course_complete(entry):
 def total_learned(learn_values):
     """求累计已学秒数。"""
     return float(sum(v or 0.0 for v in learn_values))
+
+
+def load_json_safe(path, default=None):
+    """安全读取 JSON：文件缺失 / JSON 损坏 / 读取出错一律返回 default。"""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+
+def storage_state_path(base_dir):
+    """返回 Playwright storage_state 的落盘路径。"""
+    return os.path.join(base_dir, SESSION_DIR, STORAGE_STATE_FILE)
+
+
+def is_logged_in_by_body(body):
+    """粗略的登录态文本判定（沿用原逻辑：出现“学习中心”且无“登录注册”）。"""
+    body = body or ""
+    return ("学习中心" in body) and ("登录注册" not in body)

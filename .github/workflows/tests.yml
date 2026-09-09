@@ -1,0 +1,22 @@
+name: tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 仅运行纯逻辑单元测试：依赖只有标准库，无需安装 Chromium，也不会访问知网。
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
