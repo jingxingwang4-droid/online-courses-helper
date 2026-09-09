@@ -1,6 +1,5 @@
 import json
 import os
-import re
 import threading
 import time
 import tkinter as tk
@@ -8,20 +7,22 @@ from tkinter import scrolledtext, ttk
 
 from playwright.sync_api import sync_playwright
 
+from core import (
+    DEFAULT_THEME,
+    fmt_hms,
+    is_course_complete,
+    parse_creds_text,
+    parse_progress_items,
+    parse_theme_url,
+    total_learned,
+)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CRED_FILE = os.path.join(BASE_DIR, "账号密码.md")
 OUTPUT_DIR = os.path.join(BASE_DIR, "output")
-DEFAULT_THEME = "https://k.cnki.net/themeInfo/2046"
 EXTRA_PLAY_SEC = 60
 CERT_HOURS = 15
 CERT_TOTAL_SECONDS = CERT_HOURS * 3600
-
-
-def fmt_hms(sec):
-    sec = max(0, int(sec or 0))
-    h, r = divmod(sec, 3600)
-    m, s = divmod(r, 60)
-    return ("%d:%02d:%02d" % (h, m, s)) if h else ("%d:%02d" % (m, s))
 
 INIT_SCRIPT = r"""
 (() => {
@@ -49,33 +50,12 @@ PLAYER_FLAGS = [
 
 
 def read_creds():
-    user = ""
-    pwd = ""
     try:
         with open(CRED_FILE, "r", encoding="utf-8") as f:
             text = f.read()
-        um = re.search(r"账号[:：]\s*(\S+)", text)
-        pm = re.search(r"密码[:：]\s*(\S+)", text)
-        if um:
-            user = um.group(1).strip()
-        if pm:
-            pwd = pm.group(1).strip()
     except OSError:
-        pass
-    return user, pwd
-
-
-def parse_theme_url(raw):
-    raw = (raw or "").strip()
-    m = re.search(r"themeInfo/(\d+)", raw)
-    if m:
-        tid = m.group(1)
-    elif re.fullmatch(r"\d+", raw):
-        tid = raw
-    else:
-        m = re.search(r"(\d+)", raw)
-        tid = m.group(1) if m else DEFAULT_THEME.split("/")[-1]
-    return "https://k.cnki.net/themeInfo/" + tid, tid
+        text = ""
+    return parse_creds_text(text)
 
 
 class Course:
@@ -124,6 +104,7 @@ class State:
         self.start_time = None
         self.total_sec = 0.0
         self.cert_total_sec = CERT_TOTAL_SECONDS
+        self.thread = None
 
     def log(self, msg):
         ts = time.strftime("%H:%M:%S")
@@ -256,19 +237,7 @@ def run_browser(user, pwd, theme_url):
                 if not d.get("success"):
                     return {}
                 items = ((d.get("data") or {}).get("list")) or []
-                out = {}
-                for it in items:
-                    name = it.get("courseName") or ""
-                    if not name:
-                        continue
-                    out[name] = {
-                        "progress": it.get("progress") or 0.0,
-                        "learnState": it.get("learnState"),
-                        "duration": float(it.get("duration") or 0) or 6300.0,
-                        "learnDuration": int(it.get("learnDuration") or 0),
-                        "finishDate": it.get("finishDate"),
-                    }
-                return out
+                return parse_progress_items(items)
             except Exception:
                 return {}
 
@@ -303,9 +272,11 @@ def run_browser(user, pwd, theme_url):
             course = Course(cid, name, target)
             if pm:
                 pct = pm.get("progress") or 0.0
+                course.percent = float(pct)
                 course.watched = target * pct / 100.0
                 course.learn_sec = float(pm.get("learnDuration") or target * pct / 100.0)
-                course.already_done = bool(pm.get("learnState") == 2 or pct >= 100 or pm.get("finishDate"))
+                course.server_watched = course.learn_sec
+                course.already_done = is_course_complete(pm)
             courses.append(course)
 
         with state.lock:
@@ -313,8 +284,30 @@ def run_browser(user, pwd, theme_url):
 
         def refresh_total():
             with state.lock:
-                state.total_sec = sum(c.learn_sec for c in state.courses)
+                state.total_sec = total_learned(c.learn_sec for c in state.courses)
             return state.total_sec
+
+        def sync_from_server(course):
+            """把服务端最新进度回写到 course，并刷新累计时长。"""
+            try:
+                pm = get_progress().get(course.name) or {}
+            except Exception:
+                pm = {}
+            if not pm:
+                return pm
+            with state.lock:
+                course.learn_sec = float(pm.get("learnDuration") or course.learn_sec)
+                course.percent = float(pm.get("progress") or course.percent)
+                course.server_watched = course.learn_sec
+                course.watched = course.target * course.percent / 100.0
+                course.server_complete = is_course_complete(pm)
+            return pm
+
+        def pause_video():
+            try:
+                page.evaluate("()=>{document.querySelectorAll('video').forEach(v=>{try{v.pause();}catch(e){}});}")
+            except Exception:
+                pass
 
         refresh_total()
         state.log("累计学习时长: %s / %s（证书要求）" % (fmt_hms(state.total_sec), fmt_hms(CERT_TOTAL_SECONDS)))
@@ -388,6 +381,7 @@ def run_browser(user, pwd, theme_url):
             last_check = 0.0
             while not state.stop_requested:
                 if state.paused:
+                    pause_video()
                     time.sleep(1)
                     continue
                 if not relogin_if_needed(course):
@@ -395,12 +389,13 @@ def run_browser(user, pwd, theme_url):
                 keep_alive(last)
                 if time.time() - last_check > 45:
                     last_check = time.time()
-                    pm = get_progress().get(course.name) or {}
+                    pm = sync_from_server(course)
                     refresh_total()
-                    if pm.get("learnState") == 2 or (pm.get("progress") or 0) >= 100 or pm.get("finishDate"):
+                    if is_course_complete(pm):
                         with state.lock:
                             course.status = "已完成"
                             course.percent = 100.0
+                            course.watched = course.target
                         state.log("服务器确认学完: " + course.name)
                         state.write_output()
                         break
@@ -433,6 +428,7 @@ def run_browser(user, pwd, theme_url):
             seg_start = time.time()
             while not state.stop_requested and (time.time() - seg_start < WATCH_EACH):
                 if state.paused:
+                    pause_video()
                     time.sleep(2)
                     continue
                 if not relogin_if_needed(course):
@@ -440,6 +436,7 @@ def run_browser(user, pwd, theme_url):
                 keep_alive(last)
                 if time.time() - last_log > LOG_EVERY:
                     last_log = time.time()
+                    sync_from_server(course)
                     new_total = refresh_total()
                     state.log("累计学习时长: %s / %s　(较上次 %+d 秒)" % (fmt_hms(new_total), fmt_hms(CERT_TOTAL_SECONDS), int(new_total - last_total)))
                     last_total = new_total
@@ -526,6 +523,10 @@ def build_gui():
     def start(uv, pv, tv):
         if state.running:
             return
+        prev = state.thread
+        if prev is not None and prev.is_alive():
+            state.log("上一个任务仍在收尾（即将退出），请稍候片刻再开始...")
+            return
         with state.lock:
             state.account = uv.get().strip()
             state.pwd_input = pv.get()
@@ -536,8 +537,9 @@ def build_gui():
             state.stop_requested = False
             state.paused = False
             state.done = False
+            state.thread = threading.Thread(target=worker, daemon=True)
         state.log("已开始，正在启动后台浏览器线程...")
-        threading.Thread(target=worker, daemon=True).start()
+        state.thread.start()
 
     def pause_resume():
         with state.lock:
@@ -547,7 +549,6 @@ def build_gui():
     def stop():
         with state.lock:
             state.stop_requested = True
-            state.running = False
         state.log("已请求停止")
 
     def shutdown(rt):
