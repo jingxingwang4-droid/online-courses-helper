@@ -412,6 +412,42 @@ class TestRunScopedDefaults(unittest.TestCase):
         self.assertIs(d["paused"], False)
         self.assertIs(d["done"], False)
 
+    def test_defaults_reset_runtime_state(self):
+        d = core.run_scoped_defaults()
+        self.assertEqual(d["courses"], [])
+        self.assertIsNone(d["current_cid"])
+        self.assertEqual(d["total_sec"], 0.0)
+        self.assertEqual(d["log_lines"], [])
+
+
+class TestProgressForCourseSafe(unittest.TestCase):
+    """名称兜底必须同时满足：progress 侧该名称兜底不歧义 且 专题内该课程名唯一。"""
+
+    def _pm_missing_id(self):
+        return core.parse_progress_items([{"courseName": "同名课", "progress": 50}])
+
+    def test_id_exact_match_always(self):
+        pm = core.parse_progress_items([{"courseId": 7, "courseName": "X", "progress": 30}])
+        self.assertEqual(core.progress_for_course_safe(pm, 7, "X", False)["progress"], 30.0)
+
+    def test_fallback_allowed_when_name_unique(self):
+        pm = self._pm_missing_id()
+        # 专题内名称唯一 -> 允许兜底
+        self.assertEqual(core.progress_for_course_safe(pm, None, "同名课", True)["progress"], 50.0)
+
+    def test_fallback_blocked_when_name_not_unique(self):
+        pm = self._pm_missing_id()
+        # 专题内两门不同 courseId 同叫“同名课” -> 名称不唯一 -> 都不允许兜底，防止同一份进度复制给两门课
+        self.assertEqual(core.progress_for_course_safe(pm, 10, "同名课", False), {})
+        self.assertEqual(core.progress_for_course_safe(pm, 11, "同名课", False), {})
+
+    def test_id_takes_precedence_over_ununique_name(self):
+        pm = core.parse_progress_items([{"courseId": 10, "courseName": "X", "progress": 10}, {"courseName": "X", "progress": 50}])
+        self.assertEqual(core.progress_for_course_safe(pm, 10, "X", False)["progress"], 10.0)
+
+    def test_missing_map(self):
+        self.assertEqual(core.progress_for_course_safe(None, 1, "X", True), {})
+
 
 class TestFallbackAmbiguity(unittest.TestCase):
     """缺 courseId 的名称兜底：单个可兜底；同名重复视为歧义，跳过自动关联，不静默覆盖。"""

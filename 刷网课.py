@@ -19,7 +19,7 @@ from core import (
     parse_creds_text,
     parse_theme_url,
     fallback_summary,
-    progress_for_course,
+    progress_for_course_safe,
     reached_cert_target,
     run_scoped_defaults,
     total_learned,
@@ -192,7 +192,7 @@ def run_browser(user, pwd, theme_url):
         try:
             auth = cnki_client.capture_auth(page)
         except Exception as e:
-            state.log("读取学习中心失败，无法获取认证 token，将按无进度继续: " + str(e))
+            state.log("读取学习中心失败，暂时无法获取认证信息：%s；若后续连续 %d 次同步失败，本轮将停止。" % (str(e), PROGRESS_FAIL_LIMIT))
             auth = {"lid": "", "uid": "", "authtoken": ""}
         if not auth.get("authtoken"):
             state.log("未捕获到认证信息，暂时无法同步服务端学习进度；若连续 %d 次同步失败，本轮任务将停止。" % PROGRESS_FAIL_LIMIT)
@@ -220,20 +220,31 @@ def run_browser(user, pwd, theme_url):
 
         state.log("共获取 " + str(len(courses_data)) + " 门课程")
 
+        name_count = {}
+        for _cid, _nm in courses_data:
+            name_count[_nm] = name_count.get(_nm, 0) + 1
+
+        def lookup_progress(prog_map, cid, name):
+            """先按课程 ID 精确匹配；仅当该名称在专题内唯一时才允许名称兜底。"""
+            return progress_for_course_safe(prog_map, cid, name, name_count.get(name, 0) == 1)
+
         prog_map = fetch_progress() or {}
         if prog_map:
             state.log("已读取到服务器端学习进度")
             _single, _amb = fallback_summary(prog_map)
             for _n in _single:
-                state.log("服务端课程“%s”缺少 courseId，将使用课程名称作为兜底匹配。" % _n)
+                if name_count.get(_n, 0) > 1:
+                    state.log("专题中存在多个同名课程“%s”，服务端进度又缺少 courseId，已跳过名称兜底以避免串课。" % _n)
+                else:
+                    state.log("服务端课程“%s”缺少 courseId，将使用课程名称作为兜底匹配。" % _n)
             for _n in _amb:
                 state.log("检测到多个缺少 courseId 的同名课程“%s”，名称兜底存在歧义，已跳过自动关联。" % _n)
         else:
-            state.log("未能读取服务器进度，将按视频时长继续")
+            state.log("暂未读取到服务器进度；若连续同步失败达到阈值，本轮将停止。")
 
         courses = []
         for cid, name in courses_data:
-            pm = progress_for_course(prog_map, cid, name)
+            pm = lookup_progress(prog_map, cid, name)
             target = pm["duration"] if pm.get("duration") is not None else 6300.0
             course = Course(cid, name, target)
             if pm:
@@ -251,10 +262,10 @@ def run_browser(user, pwd, theme_url):
 
         if not courses:
             state.log("专题下未获取到可学习课程，已停止。")
-            state.write_output()
             with state.lock:
                 state.done = True
                 state.running = False
+            state.write_output()
             try:
                 browser.close()
             except Exception:
@@ -269,7 +280,7 @@ def run_browser(user, pwd, theme_url):
         def sync_from_server(course):
             """把服务端最新进度回写到 course，并刷新累计时长。注意 0 是合法值，不会回退旧值。"""
             try:
-                pm = progress_for_course(fetch_progress() or {}, course.cid, course.name)
+                pm = lookup_progress(fetch_progress() or {}, course.cid, course.name)
             except Exception:
                 pm = {}
             if not pm:
@@ -314,7 +325,8 @@ def run_browser(user, pwd, theme_url):
 
 
 
-        state.log("学习开始：先补学未完成课程，然后循环观看回放并观察学习时长增长")
+        if not state.stop_requested:
+            state.log("学习开始：先补学未完成课程，然后循环观看回放并观察学习时长增长")
 
         def mute_and_play_from_start():
             page.evaluate("()=>{document.querySelectorAll('video').forEach(v=>{v.muted=true;v.volume=0;});}")
@@ -358,7 +370,7 @@ def run_browser(user, pwd, theme_url):
             if state.stop_requested:
                 break
             try:
-                pm = progress_for_course(fetch_progress() or {}, course.cid, course.name)
+                pm = lookup_progress(fetch_progress() or {}, course.cid, course.name)
             except Exception:
                 pm = {}
             if (pm.get("learnState") == 2 or (pm.get("progress") or 0) >= 100 or pm.get("finishDate") or course.already_done):
@@ -560,7 +572,20 @@ def build_gui():
     def shutdown(rt):
         with state.lock:
             state.stop_requested = True
-        rt.destroy()
+        state.log("正在停止，等待后台浏览器线程退出...")
+
+        def _poll():
+            t = state.thread
+            if t is None or not t.is_alive():
+                rt.destroy()
+                return
+            if time.time() - _poll.started > 15:
+                rt.destroy()
+                return
+            rt.after(150, _poll)
+
+        _poll.started = time.time()
+        _poll()
 
     def fmt_secs(sec):
         sec = max(0, int(sec))
@@ -595,7 +620,7 @@ def build_gui():
         elif snap["cert_reached"]:
             state_lbl.config(text="状态: 已达到目标学习时长", foreground="#2ecc71")
         elif snap["done"]:
-            state_lbl.config(text="状态: 完成", foreground="#2ecc71")
+            state_lbl.config(text="状态: 已停止", foreground="#e67e22")
         elif snap["running"]:
             state_lbl.config(text="状态: 运行中 (账号 " + snap["account"] + ")", foreground="#2980b9")
         else:

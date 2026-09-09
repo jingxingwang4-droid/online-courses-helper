@@ -222,6 +222,36 @@ def advance_fail_count(count, ok, limit):
 def run_scoped_defaults():
     """每次“开始学习”时需重置为“全新一次任务”的生命周期字段及默认值。
 
-    用于避免上一次运行的停用/暂停/完成/达标状态在下一轮残留。
+    用于避免上一次运行的停用/暂停/完成/达标状态，以及与单次任务相关的
+    课程列表、当前课程、累计时长、日志在下一轮残留。
     """
-    return {"stop_requested": False, "paused": False, "done": False, "cert_reached": False}
+    return {
+        "stop_requested": False,
+        "paused": False,
+        "done": False,
+        "cert_reached": False,
+        "courses": [],
+        "current_cid": None,
+        "total_sec": 0.0,
+        "log_lines": [],
+    }
+
+
+def progress_for_course_safe(prog_map, cid, name, name_is_unique):
+    """按 courseId 精确匹配；仅当课程名称在专题内唯一(name_is_unique=True)时才允许名称兜底。
+
+    用于避免“专题中同名多门课 + 服务端进度缺失 courseId”时将同一份进度复制给多门课。
+    """
+    if not isinstance(prog_map, dict):
+        return {}
+    if cid is not None:
+        v = prog_map.get(str(cid))
+        if v is not None:
+            return v
+    if name_is_unique:
+        name = (name or "").strip()
+        if name:
+            v = prog_map.get("name:" + name)
+            if v is not None:
+                return v
+    return {}
